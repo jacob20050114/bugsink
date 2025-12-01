@@ -15,6 +15,11 @@ from issues.models import Issue
 class SlackConfigForm(forms.Form):
     webhook_url = forms.URLField(required=True)
 
+    # Slack does not support multi-channel webhooks, as per the docs:
+    # > You cannot override the default channel (chosen by the user who installed your app), username, or icon when
+    # > you're using incoming webhooks to post messages. Instead, these values will always inherit from the associated
+    # > Slack app configuration.
+
     def __init__(self, *args, **kwargs):
         config = kwargs.pop("config", None)
 
@@ -144,22 +149,22 @@ def slack_backend_send_alert(
     issue = Issue.objects.get(id=issue_id)
 
     issue_url = get_settings().BASE_URL + issue.get_absolute_url()
-    link = f"<{issue_url}|" + _safe_markdown(truncatechars(issue.title().replace("|", ""), 200)) + ">"
+    title = truncatechars(issue.title().replace("|", ""), 200)
+    link = f"<{issue_url}|view on Bugsink>"
 
     sections = [
                 {
                     "type": "header",
                     "text": {
                         "type": "plain_text",
-                        # TODO arguably issue.title() should get this location; "later" because I don't have a test env.
-                        "text": f"{alert_reason} issue",
+                        "text": title,
                     },
                 },
                 {
                     "type": "section",
                     "text": {
-                        "type": "mrkdwn",
-                        "text": link,
+                        "type": "plain_text",
+                        "text": f"{alert_reason} issue",
                     },
                 },
                ]
@@ -186,18 +191,24 @@ def slack_backend_send_alert(
     # if event.environment:
     #     fields["environment"] = event.environment
 
-    data = {"text": sections[0]["text"]["text"],  # mattermost requires at least one text field; use the first section
-            "blocks": sections + [
-                {
-                    "type": "section",
-                    "fields": [
+    sections += [{"type": "section",
+                  "fields": [
                         {
                             "type": "mrkdwn",
                             "text": f"*{field}*: " + _safe_markdown(value),
                         } for field, value in fields.items()
-                    ]
-                },
-            ]}
+                    ]}]
+
+    sections += [{
+                    "type": "section",
+                    "text": {
+                        "type": "mrkdwn",
+                        "text": link,
+                    },
+                }]
+
+    # slack service-backend also support mattermost; mattermost requires at least one text field; use the first section
+    data = {"text": sections[0]["text"]["text"], "blocks": sections}
 
     try:
         result = requests.post(
@@ -222,7 +233,8 @@ class SlackBackend:
     def __init__(self, service_config):
         self.service_config = service_config
 
-    def get_form_class(self):
+    @classmethod
+    def get_form_class(cls):
         return SlackConfigForm
 
     def send_test_message(self):

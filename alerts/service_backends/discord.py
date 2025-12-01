@@ -1,3 +1,4 @@
+from urllib.parse import urlparse
 import json
 import requests
 from django.utils import timezone
@@ -12,12 +13,22 @@ from bugsink.transaction import immediate_atomic
 from issues.models import Issue
 
 
-class MattermostConfigForm(forms.Form):
-    webhook_url = forms.URLField(required=True)
-    channel = forms.CharField(
-        required=False,
-        help_text='Optional: Override channel (e.g., "town-square" or "@username" for DMs)',
+def url_valid_according_to_discord(url):
+    # See https://github.com/bugsink/bugsink/issues/280 for "according to Discord"
+    parsed = urlparse(url)
+    return (
+        parsed.scheme in ("http", "https")
+        and parsed.hostname is not None
+        and "." in parsed.hostname
     )
+
+
+class DiscordConfigForm(forms.Form):
+    webhook_url = forms.URLField(required=True)
+
+    # Discord does not appear to support multi-channel webhooks; although this is not spelled out explicitly, the
+    # section at https://discord.com/developers/docs/resources/webhook#execute-webhook does not have an attr for
+    # "channel". (the word channel appears on that page, but that's for the _creation_ of new webhooks).
 
     def __init__(self, *args, **kwargs):
         config = kwargs.pop("config", None)
@@ -25,18 +36,11 @@ class MattermostConfigForm(forms.Form):
         super().__init__(*args, **kwargs)
         if config:
             self.fields["webhook_url"].initial = config.get("webhook_url", "")
-            self.fields["channel"].initial = config.get("channel", "")
 
     def get_config(self):
         return {
             "webhook_url": self.cleaned_data.get("webhook_url"),
-            "channel": self.cleaned_data.get("channel"),
         }
-
-
-def _safe_markdown(text):
-    # Mattermost uses similar markdown escaping as Slack
-    return text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;").replace("*", "\\*").replace("_", "\\_")
 
 
 def _store_failure_info(service_config_id, exception, response=None):
@@ -89,29 +93,25 @@ def _store_success_info(service_config_id):
 
 
 @shared_task
-def mattermost_backend_send_test_message(webhook_url, project_name, display_name, service_config_id, channel=None):
-    # See https://developers.mattermost.com/integrate/reference/message-attachments/
+def discord_backend_send_test_message(
+    webhook_url, project_name, display_name, service_config_id
+):
+    # Discord uses embeds for rich formatting
+    # Color: 0x7289DA is Discord's blurple color
 
-    data = {"text": "### Test message by Bugsink to test the webhook setup.",
-            "attachments": [
-                {
-                    "title": "TEST issue",
-                    "text": "Test message by Bugsink to test the webhook setup.",
-                    "fields": [
-                        {
-                            "title": "project",
-                            "value": _safe_markdown(project_name),
-                        },
-                        {
-                            "title": "message backend",
-                            "value": _safe_markdown(display_name),
-                        },
-                    ]
-                }
-            ]}
-
-    if channel:
-        data["channel"] = channel
+    data = {
+        "embeds": [
+            {
+                "title": "TEST issue",
+                "description": "Test message by Bugsink to test the webhook setup.",
+                "color": 0x7289DA,
+                "fields": [
+                    {"name": "Project", "value": project_name, "inline": True},
+                    {"name": "Message Backend", "value": display_name, "inline": True},
+                ],
+            }
+        ]
+    }
 
     try:
         result = requests.post(
@@ -133,45 +133,53 @@ def mattermost_backend_send_test_message(webhook_url, project_name, display_name
 
 
 @shared_task
-def mattermost_backend_send_alert(
-        webhook_url, issue_id, state_description, alert_article, alert_reason, service_config_id, unmute_reason=None,
-        channel=None):
+def discord_backend_send_alert(
+        webhook_url, issue_id, state_description, alert_article, alert_reason, service_config_id, unmute_reason=None):
 
     issue = Issue.objects.get(id=issue_id)
 
     issue_url = get_settings().BASE_URL + issue.get_absolute_url()
-    link = f"<{issue_url}|" + _safe_markdown(truncatechars(issue.title().replace("|", ""), 200)) + ">"
+    issue_title = truncatechars(issue.title(), 256)  # Discord title limit
 
-    data = {"text": "### " + _safe_markdown(truncatechars(issue.title().replace("|", ""), 200)),
-            "attachments": [
-                {
-                    "title": f"{alert_reason} issue",
-                    "text": link,
-                    "fields": [],
-                }
-            ]}
+    # Color coding based on alert reason
+    # Red for new issues, orange for recurring, blue for unmuted
+    color_map = {
+        "NEW": 0xE74C3C,  # Red
+        "RECURRING": 0xE67E22,  # Orange
+        "UNMUTED": 0x3498DB,  # Blue
+    }
+    color = color_map.get(alert_reason, 0x95A5A6)  # Gray as default
+
+    embed = {
+        "title": issue_title,
+        "description": f"{alert_reason} issue",
+        "color": color,
+        "fields": [{"name": "Project", "value": issue.project.name, "inline": True}],
+    }
+
+    if url_valid_according_to_discord(issue_url):
+        embed["url"] = issue_url
 
     if unmute_reason:
-        data["attachments"][0]["text"] += "\n\n" + _safe_markdown(unmute_reason)
-
-    # assumption: visavis email, project.name is of less importance, because in slack-like things you may (though not
-    # always) do one-channel per project. more so for site_title (if you have multiple Bugsinks, you'll surely have
-    # multiple slack channels)
-    fields = [{
-        "title": "Project",
-        "value": _safe_markdown(issue.project.name),
-    }]
+        embed["fields"].append(
+            {"name": "Unmute Reason", "value": unmute_reason, "inline": False}
+        )
 
     # left as a (possible) TODO, because the amount of refactoring (passing event to this function) is too big for now
     # if event.release:
-    #     fields.append({"title": "Release", "value": _safe_markdown(event.release)})
+    #     embed["fields"].append({
+    #         "name": "Release",
+    #         "value": event.release,
+    #         "inline": True
+    #     })
     # if event.environment:
-    #     fields.append("title": "Environment", "value": _safe_markdown(event.environment)})
+    #     embed["fields"].append({
+    #         "name": "Environment",
+    #         "value": event.environment,
+    #         "inline": True
+    #     })
 
-    data["attachments"][0]["fields"] += fields
-
-    if channel:
-        data["channel"] = channel
+    data = {"embeds": [embed]}
 
     try:
         result = requests.post(
@@ -192,33 +200,31 @@ def mattermost_backend_send_alert(
         _store_failure_info(service_config_id, e)
 
 
-class MattermostBackend:
+class DiscordBackend:
+
     def __init__(self, service_config):
         self.service_config = service_config
 
     @classmethod
     def get_form_class(cls):
-        return MattermostConfigForm
+        return DiscordConfigForm
 
     def send_test_message(self):
-        config = json.loads(self.service_config.config)
-        mattermost_backend_send_test_message.delay(
-            config["webhook_url"],
+        discord_backend_send_test_message.delay(
+            json.loads(self.service_config.config)["webhook_url"],
             self.service_config.project.name,
             self.service_config.display_name,
             self.service_config.id,
-            channel=config.get("channel"),
         )
 
     def send_alert(self, issue_id, state_description, alert_article, alert_reason, **kwargs):
         config = json.loads(self.service_config.config)
-        mattermost_backend_send_alert.delay(
+        discord_backend_send_alert.delay(
             config["webhook_url"],
             issue_id,
             state_description,
             alert_article,
             alert_reason,
             self.service_config.id,
-            channel=config.get("channel"),
             **kwargs,
         )
