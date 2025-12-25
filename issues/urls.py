@@ -67,8 +67,5 @@ urlpatterns = [
     path('issue/<uuid:issue_pk>/history/comment/<int:comment_pk>/', history_comment_edit, name="history_comment_edit"),
     path('issue/<uuid:issue_pk>/history/comment/<int:comment_pk>/delete/', history_comment_delete,
          name="history_comment_delete"),
-    #---------------- Add
-    #path('api/canonical/0/events/<uuid:event_pk>/', trigger_useapi, name='trigger_useapi'),
     path('issue/<uuid:issue_pk>/api/ask-gemini/<uuid:event_id>/', trigger_useapi, name="trigger_useapi"),
-    #---------------- Add
 ]

@@ -53,3 +53,6 @@ node_modules
 
 # Docker artifacts
 /bugsink*tar
+
+#script written for LSAP final project
+/start.sh

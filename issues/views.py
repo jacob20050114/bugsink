@@ -589,15 +589,6 @@ def issue_event_details(request, issue, event_pk=None, digest_order=None, nav=No
     except Event.DoesNotExist:
         return issue_event_404(request, issue, event_x_qs, "event-details", "event_details")
     parsed_data = event.get_parsed_data()
-    #----------------------- Add
-    try:
-        # 使用 'w' 模式：每次開啟都會清空檔案內容
-        with open('/data/id.txt', 'w') as f:
-            f.write(str(event.id))
-    except Exception as e:
-        # 簡單的錯誤捕捉，避免因為寫檔權限問題導致網頁崩潰
-        print(f"Error writing event ID to file: {e}")
-    #------------------------ Add
     key_info = [
         ("title", event.title()),
         ("transaction", issue.transaction),
@@ -851,33 +842,24 @@ def history_comment_delete(request, issue, comment_pk):
         return redirect(reverse(issue_history, kwargs={'issue_pk': issue.pk}))
 
     return HttpResponseNotAllowed(["POST"])
-#-------------------- Add
+
 def trigger_useapi(request, issue_pk, event_id):
-    """
-    [除錯模式] 移除所有權限檢查與裝飾器，直接測試核心邏輯。
-    """
     try:
-        # 1. 嘗試 import，放在這裡可以捕捉 Import 錯誤
         try:
             from . import useAPI
         except ImportError as e:
              return JsonResponse({'analysis': f"Import 失敗: {str(e)}"}, status=500)
 
-        # 2. 呼叫 useAPI
-        # 因為 URL 定義是 <uuid:event_id>，Django 傳進來的 event_id 是 UUID 物件
-        # 我們把它轉成字串再傳給 useAPI，比較保險
+        # Call useAPI.py
         event_id_str = str(event_id)
-        
-        # 執行邏輯
         result_text = useAPI.process_task(event_id_str)
         
         return JsonResponse({'analysis': result_text})
 
     except Exception as e:
-        # 捕捉所有錯誤並回傳 JSON，這樣前端才能顯示詳細錯誤
         error_details = traceback.format_exc()
-        print(f"!!! Ask Gemini Error !!!\n{error_details}") # 印在後台 Log
+        print(f"!!! Ask Gemini Error !!!\n{error_details}")
 
         return JsonResponse({
-            'analysis': f"伺服器內部錯誤 (View Crash):\n{str(e)}\n\n詳細追蹤:\n{error_details}"
+            'analysis': f"Internal server error (View Crash):\n{str(e)}\n\ndetail:\n{error_details}"
         }, status=500)
